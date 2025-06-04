@@ -1,0 +1,7 @@
+gradio
+langchain_community
+pypdf
+langchain-text-splitters
+langchain-openai
+langchain-chroma>=0.1.2 
+beautifulsoup4
