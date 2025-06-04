@@ -6,6 +6,7 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 import os
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
+import tempfile
 
 # Load environment variables from .env file
 load_dotenv()
@@ -46,6 +47,12 @@ system_prompt = """
     Se a resposta para a pergunta não estiver no contexto, verifica se está na história da conversa. Se estiver, responde baseado nessa informação.
     Se após verificar o contexto e a história da conversa ainda não conseguires responder, não uses o teu conhecimento interno, responde com 'Não tenho o contexto necessário para essa pergunta'.
     Se as tuas respostas forem do contexto, adiciona o número do capítulo, da cláusula e das páginas (caso estes existam) que usaste como referência para a tua resposta, num parágrafo separado.
+    Se a tua resposta remeter o utilizador para informação presenta nas condições particulares, sugere-lhe que carregue o ficheiro de condições particulares no chat.
+    Se o utilizador carregar com sucesso um ficheiro de condições particulares, pede-lhe o Número de Apólice no chat.
+    Se a pergunta for sobre condições particulares ou coberturas, só podes responder se tiveres o "Policy number" (número da apólice) no contexto com uma mensagem do humano "human" que corresponde ao número da apólice "Policy number" que está no documento carregado por ele.
+    É importante que apenas respondas sobre condições particulares e valores de capitais se no teu histórico tiveres uma mensagem do humano "human" que corresponde ao número da apólice "Policy number" que está no documento carregado por ele.
+    Se não tiveres contexto com esse número de apólice, response que não tens esse número de apólice no contexto.
+    Nas tuas respostas nunca incluas dados pessoais, como nome, email, número de telefone, morada, data de nascimento, cartão de cidadão. Dados específicos de seguro como valores de capitais e números de apólice podes escrever.
     Responde sempre em português de Portugal.
 """
 
@@ -67,6 +74,20 @@ def documentsFromWebSite(url):
 def cleanDocuments(documents):
   for document in documents:
     document.page_content = re.sub('\n', ' ', document.page_content)
+
+def validDocument(documents):
+    if not documents:  # Check if documents list is empty
+        return False
+
+    # Get the first document's content and convert to lowercase for case-insensitive comparison
+    first_doc_content = documents[0].page_content.lower()
+
+    # Check for both required strings in the first document.
+    # TODO improve this
+    has_condicoes = "condições particulares" in first_doc_content
+    has_apolice = "n.ºapólice" in first_doc_content
+
+    return has_condicoes and has_apolice
 
 def removeUselessWebChunks(chunks):
   # remove all chunks until the first ocurrence of "Ver todas as perguntas frequentes"
@@ -114,10 +135,41 @@ def addMetadataToChunks(chunks):
             "page": currentPage,
             "type": "pdf"
         }
+
+def extractPolicyNumberFromParticularConditions(documents):
+  for document in documents:
+    policy_number = re.search(r'N\.ºApólice:\s*(\d+)Data', document.page_content)
+    if policy_number:
+      return policy_number.group(1)
+  return None
+
+def addWebMetadataToParticularConditionsChunks(chunks, policy_number):
+  for chunk in chunks:
+      # Extract page number if it matches the format "Pág. X de Y"
+      page_match = re.search(r'Pág\.\s*(\d+)\s*de\s*\d+', chunk.page_content)
+      if page_match:
+          currentPage = page_match.group(1)  # Extract the page number
+      else:
+          currentPage = "1"  # Default to page 1 if not found
+
+      chunk.metadata = {
+          "type": "web",
+          "page": currentPage,
+          "policy_number": policy_number
+      }
+
+def removeUselessParticularConditionsChunks(chunks):
+  # remove all chunks that are from page 1
+  newChunks = []
+  for chunk in chunks:
+    if chunk.metadata["page"] != "1":
+      newChunks.append(chunk)
+  return newChunks
+
 def addWebMetadataToChunks(chunks):
     for chunk in chunks:
         chunk.metadata = {
-            "type": "web",
+            "type": "pdf",
             "page": FAQ_URL
         }
 
@@ -152,35 +204,10 @@ def ingestionStage(): # 1 - x (sempre que quisermos colocar dados novos na nossa
   webChunks = getChunks(webDocuments, 1000, 100)
   webChunks = removeUselessWebChunks(webChunks)
   addWebMetadataToChunks(webChunks)
-  # print("Chunk 0: ", webChunks[0].page_content)
-  # print("Chunk 1: ", webChunks[1].page_content)
-  # print("Chunk 2: ", webChunks[2].page_content)
-  # print("Chunk 3: ", webChunks[3].page_content)
-  # print("Chunk 4: ", webChunks[4].page_content)
-  # print("Chunk 5: ", webChunks[5].page_content)
-  # print("Chunk 6: ", webChunks[6].page_content)
-  # print("Chunk 7: ", webChunks[7].page_content)
-  # print("Chunk 8: ", webChunks[8].page_content)
-  # print("Chunk 9: ", webChunks[9].page_content)
-  # print("Chunk 10: ", webChunks[10].page_content)
-
-#   print("Chunk 0: ", chunks[0].page_content)
-#   print("Chunk 1: ", chunks[1].page_content)
-#   print("Chunk 2: ", chunks[2].page_content)
-#   print("Chunk 3: ", chunks[3].page_content)
-#   print("Chunk 4: ", chunks[4].page_content)
-#   print("Chunk 5: ", chunks[5].page_content)
-#   print("Chunk 6: ", chunks[6].page_content)
-#   print("Chunk 7: ", chunks[7].page_content)
-#   print("Chunk 8: ", chunks[8].page_content)
-#   print("Chunk 9: ", chunks[9].page_content)
-#   print("Chunk 10: ", chunks[10].page_content)
-
 
   ## Step 1.4 Store on Vector DB - acontece o step 1.3 e 1.4 ao mesmo tempo
   storeChunks(chunks)
   storeChunks(webChunks)
-  #print(ids)
   # End Phase 1
 
 
@@ -226,44 +253,67 @@ def invokeLLM(prompt):
 
   return llm_response
 
-def predict(message, history): # y  (sempre que existe uma pergunta de um user no frontend)
+def process_uploaded_file(file):
+    if file is None:
+        return "Por favor, carregue um ficheiro PDF."
 
-  # Phase 2 - RAG - Generation
-  # Step 2.1 - Embed user query or message
-  user_query = message
+    try:
+        # Create a temporary file to store the uploaded content
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+            # In Gradio, the file object contains the path in the 'name' attribute
+            with open(file.name, 'rb') as uploaded_file:
+                tmp_file.write(uploaded_file.read())
+            tmp_path = tmp_file.name
 
-  # Step 2.2 - Embedding of user query (demonstração) # mesma coleção usa-se SEMPRE o mesmo embedding_model
-  # embeddings_user_query = embeddings_model.embed_query(user_query)
-  # When we do this. we can do similarity_Search_by_vector
-  ## iriamos ter 1 vector com o significado semantico da user query
+        # Process the uploaded PDF
+        # TODO try to load data with unstructured.io, given tables in PDF is hard to read
+        documents = documentsFromPdfFile(tmp_path)
+        cleanDocuments(documents)
+        if not validDocument(documents):
+            os.unlink(tmp_path)
+            return "Por favor, carregue apenas ficheiros de condições particulares válidas."
 
+        #print("Documents: ", documents)
+        policy_number = extractPolicyNumberFromParticularConditions(documents)
+        #print("Policy number: ", policy_number)
 
-  #Step 2.3. - Similarity search
-  # This step has costs, it converts stuff using embedding model
-  relevant_chunks = getSimilarChunks(user_query) # devolve os 4 valores mais relevantes (valor default)
-  # poderia adicionar metadata aos chunks e depois na search filtrar por metadata, se quiser que alguns contextos sejam específicos de users.
+        chunks = getChunks(documents, 1500, 100)
+        addWebMetadataToParticularConditionsChunks(chunks, policy_number)
+        chunks = removeUselessParticularConditionsChunks(chunks)
+        storeChunks(chunks)
 
-  #print(len(relevant_chunks))
-  #print(relevant_chunks)
+        # Clean up the temporary file
+        os.unlink(tmp_path)
 
-  relevant_chunks_text = ""
-  for relevant_chunk in relevant_chunks:
-    # Há quem adicionei ids das chunks no prompt
-    relevant_chunks_text += (
-        "Content: " + relevant_chunk.page_content + "\n" +
-        "Page: " + (relevant_chunk.metadata["page"] if "page" in relevant_chunk.metadata else "N/A") + "\n" +
-        "Chapter: " + (relevant_chunk.metadata["chapter"] if "chapter" in relevant_chunk.metadata else "N/A") + "\n" +
-        "Type: " + relevant_chunk.metadata["type"] + "\n"
-    )
+        return "Ficheiro processado com sucesso! Pode agora fazer perguntas sobre o conteúdo do documento."
+    except Exception as e:
+        # Clean up the temporary file if it exists
+        if 'tmp_path' in locals():
+            os.unlink(tmp_path)
+        return f"Erro ao processar o ficheiro: {str(e)}"
 
-  #print("Relevant Chunks Text: ", relevant_chunks_text)
+def predict(message, history, file=None):
+    # If a file was uploaded, process it first
+    if file is not None:
+        return process_uploaded_file(file)
 
-  # Step 2.4 - Create prompt
-  prompt = getPrompt(user_query, relevant_chunks_text)
+    # Continue with the normal chat prediction if no file was uploaded
+    user_query = message
+    relevant_chunks = getSimilarChunks(user_query)
 
-  llm_response = invokeLLM(prompt)
+    relevant_chunks_text = ""
+    for relevant_chunk in relevant_chunks:
+        relevant_chunks_text += (
+            "Content: " + relevant_chunk.page_content + "\n" +
+            "Page: " + (relevant_chunk.metadata["page"] if "page" in relevant_chunk.metadata else "N/A") + "\n" +
+            "Chapter: " + (relevant_chunk.metadata["chapter"] if "chapter" in relevant_chunk.metadata else "N/A") + "\n" +
+            "Type: " + relevant_chunk.metadata["type"] + "\n" +
+            "Policy number: " + (relevant_chunk.metadata["policy_number"] if "policy_number" in relevant_chunk.metadata else "N/A") + "\n"
+        )
 
-  return llm_response.content
+    prompt = getPrompt(user_query, relevant_chunks_text)
+    llm_response = invokeLLM(prompt)
+    return llm_response.content
 
 ingestionStage()
 #print(predict("O seguro cobre danos de explosão? Se sim, qual a cobertura?", ""))
@@ -277,12 +327,28 @@ with gr.Blocks() as demo:
         label="Assistente de Seguros Zé Cautela"
     )
     msg = gr.Textbox(label="Escreva a sua mensagem")
+    upload_button = gr.UploadButton(
+        "Carregar PDF",
+        file_types=[".pdf", "application/pdf"],
+        file_count="single"
+    )
 
-    def respond(message, chat_history):
-        bot_message = predict(message, chat_history)
+    # Separate handler for chat messages
+    def chat_respond(message, chat_history):
+        bot_message = predict(message, chat_history, None)
         chat_history.append([message, bot_message])
         return "", chat_history
 
-    msg.submit(respond, [msg, chatbot], [msg, chatbot])
+    # Separate handler for file uploads
+    def file_respond(file, chat_history):
+        if file is None:
+            return chat_history
+        bot_message = process_uploaded_file(file)
+        chat_history.append([f"Uploaded: {file.name}", bot_message])
+        return chat_history
+
+    # Connect the handlers to their respective events
+    msg.submit(chat_respond, [msg, chatbot], [msg, chatbot])
+    upload_button.upload(file_respond, [upload_button, chatbot], [chatbot])
 
 demo.launch(debug=True)
