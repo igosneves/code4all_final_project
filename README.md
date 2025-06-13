@@ -26,10 +26,10 @@ source venv/bin/activate  # On Unix/macOS
 pip3 install -r requirements.txt
 ```
 
-4. Set up your OpenAI API key:
+4. Set up your OpenAI API key in a .env file:
 
 ```bash
-export OPENAI_API_KEY='your-api-key-here'
+OPENAI_API_KEY='your-api-key-here'
 ```
 
 ## Running the Application
@@ -44,10 +44,12 @@ The application will start a local Gradio server, and you can access the interfa
 
 ## Features
 
-- PDF document upload and analysis
-- Text extraction and processing
-- Interactive Q&A with document content
-- User-friendly web interface
+- PDF document with general insurance conditions upload and analysis
+- Load FAQ from insurance page using WebBaseLoader
+- Support for user to upload PDF with specific insurance conditions to add to conversation context
+- Optimized system prompt for protection of the allowed context
+- Fine grained document parsing and chunking for the 3 types of documents supported
+- Reference context available in chat answers for increased trust
 
 ## Dependencies
 
