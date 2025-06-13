@@ -13,7 +13,6 @@ load_dotenv()
 
 # Now we can access the API key from .env
 embeddings_model = OpenAIEmbeddings(
-    #model = "text-embedding-3-small"
     model = "text-embedding-3-large"
 )
 
@@ -27,18 +26,6 @@ messages = []
 
 FAQ_URL = "https://www.generalitranquilidade.pt/perguntas-frequentes"
 
-
-# system_prompt = f"""
-#     You are a professional assistant in the insurance industry and know a lot about insurances.
-
-#     Instructions:
-#     Answer the provided user query based on the provided Context.
-#     If the answer for the question is not on the provided Context, check if it's on the Chat History. If it is, answer based on that.
-#     If after checking the context and chat history you still don't know the answer,
-#     don't use internal knowledge, answer with 'I don't have the provided context for that question'.
-#     When the answer is related to clauses, mention the chapter and clause number as reference, in a separate paragraph.
-#     Reply in portuguese from Portugal.
-# """
 system_prompt = """
     És um assistente de seguros, que se chama Zé Cautela, que responde a perguntas sobre cobertura dos seguros que tens no teu contexto.
 
@@ -61,9 +48,8 @@ messages.append(
 )
 
 def documentsFromPdfFile(file_path):
-  # e.g. can use a CSVLoader
-  loader = PyPDFLoader(file_path, mode="single") # we can use different loaders, eg by folder, by url, etc
-  documents = loader.load() #langchain já faz por vezes algum chunking e mete metadata
+  loader = PyPDFLoader(file_path, mode="single")
+  documents = loader.load()
   return documents
 
 def documentsFromWebSite(url):
@@ -100,24 +86,15 @@ def removeUselessWebChunks(chunks):
 
 def getChunks(documents, chunk_size, chunk_overlap):
   text_splitter = RecursiveCharacterTextSplitter(
-      chunk_size=chunk_size, #começar com 500 ou 1000 e ir mexendo de 100 em 100
-      chunk_overlap=chunk_overlap #0.15 - 0.3 do valor do size só para dados não estruturados
+      chunk_size=chunk_size,
+      chunk_overlap=chunk_overlap
   )
   chunks = text_splitter.split_documents(documents)
-
-  # TIP - Por norma, dados estruturados não precisam de chunk size (e.g. CSV é lido por linha)
-
-  #text_splitter = CharacterTextSplitter(
-  #    separator=".",
-  #    chunk_size=1000,
-  #    chunk_overlap=100
-  #)
 
   return chunks
 
 def addMetadataToChunks(chunks):
     currentChapter = ""
-    currentClause = ""
     currentPage = "1"
     for chunk in chunks:
         # Extract page number using regex
@@ -128,7 +105,6 @@ def addMetadataToChunks(chunks):
         if "CAPÍTULO" in chunk.page_content:
             currentChapter = chunk.page_content.split("CAPÍTULO")[1].split(" ")[1].strip()
 
-        # print("Current Page: ", currentPage)
         # Add both chapter and page to metadata
         chunk.metadata = {
             "chapter": currentChapter,
@@ -173,13 +149,13 @@ def addWebMetadataToChunks(chunks):
             "page": FAQ_URL
         }
 
-#Store the chunks in the vector db
+# Store the chunks in the vector db
 def storeChunks(chunks):
   global vector_db
   ids = vector_db.add_documents(chunks)
   return ids
 
-def ingestionStage(): # 1 - x (sempre que quisermos colocar dados novos na nossa vectordb)
+def ingestionStage():
   # Skip ingestion stage if we already have the data in the vector db
   global vector_db
   if len(vector_db.get()['documents']) > 0:
@@ -188,24 +164,23 @@ def ingestionStage(): # 1 - x (sempre que quisermos colocar dados novos na nossa
 
   # Phase 1 load (Pre-RAG)
 
-  # Importante -> escolher o melhor loader baseado no formato dos dados
   ### Step 1.1 Document Load
   pdfDocuments = documentsFromPdfFile("seguro.pdf")
   webDocuments = documentsFromWebSite(FAQ_URL)
   ### Step 1.2 Document Transformation
 
-  # Step intermédio de limpeza PDF
+  # Intermediate clean up PDF
   cleanDocuments(pdfDocuments)
   chunks = getChunks(pdfDocuments, 1100, 100)
   addMetadataToChunks(chunks)
 
-  # Step intermédio de limpeza Web
+  # Intermediate clean up Web
   cleanDocuments(webDocuments)
   webChunks = getChunks(webDocuments, 1000, 100)
   webChunks = removeUselessWebChunks(webChunks)
   addWebMetadataToChunks(webChunks)
 
-  ## Step 1.4 Store on Vector DB - acontece o step 1.3 e 1.4 ao mesmo tempo
+  ## Step 1.4 Store on Vector DB - happens step 1.3 and 1.4 at the same time
   storeChunks(chunks)
   storeChunks(webChunks)
   # End Phase 1
@@ -231,15 +206,11 @@ def invokeLLM(prompt):
 
   # Step 2.5 - Call LLM
   llm = ChatOpenAI(
-      # model="gpt-4.1-nano"
-      #model="gpt-4.1-mini"
       model="gpt-4.1",
       temperature=0.1
   )
 
   # 3 roles - human, system, assistant
-  # system - usado para instruções, cenas globais para a conversa
-  # posso usar o tokenizer para saber número de tokens que estão a ser enviados
   messages.append(
       ("human", prompt)
   )
@@ -248,8 +219,6 @@ def invokeLLM(prompt):
   messages.append(
       ("assistant", llm_response.content)
   )
-
-  #print(messages)
 
   return llm_response
 
@@ -273,9 +242,7 @@ def process_uploaded_file(file):
             os.unlink(tmp_path)
             return "Por favor, carregue apenas ficheiros de condições particulares válidas."
 
-        #print("Documents: ", documents)
         policy_number = extractPolicyNumberFromParticularConditions(documents)
-        #print("Policy number: ", policy_number)
 
         chunks = getChunks(documents, 1500, 100)
         addWebMetadataToParticularConditionsChunks(chunks, policy_number)
@@ -316,8 +283,6 @@ def predict(message, history, file=None):
     return llm_response.content
 
 ingestionStage()
-#print(predict("O seguro cobre danos de explosão? Se sim, qual a cobertura?", ""))
-#print(predict("Como posso reportar um sinistro?", ""))
 
 with gr.Blocks() as demo:
     chatbot = gr.Chatbot(
